@@ -12,9 +12,12 @@ use std::{
 use crate::{
     body::Body,
     extract::Extract,
+    response::IntoResponse,
     router::{Resource, Router},
     Middleware, Request, Response, RouteMatch,
 };
+
+type FallbackHandler = fn() -> Response;
 
 /// The top-level type for setting up a Tide application.
 ///
@@ -25,6 +28,11 @@ pub struct App<Data> {
     data: Data,
     router: Router<Data>,
     middleware: Vec<Box<dyn Middleware<Data> + Send + Sync>>,
+    fallback_handler: FallbackHandler,
+}
+
+fn default_fallback_handler() -> Response {
+    http::status::StatusCode::NOT_FOUND.into_response()
 }
 
 impl<Data: Clone + Send + Sync + 'static> App<Data> {
@@ -34,6 +42,7 @@ impl<Data: Clone + Send + Sync + 'static> App<Data> {
             data,
             router: Router::new(),
             middleware: Vec::new(),
+            fallback_handler: default_fallback_handler,
         }
     }
 
@@ -48,11 +57,18 @@ impl<Data: Clone + Send + Sync + 'static> App<Data> {
         self
     }
 
+    pub fn fallback_handler<'a>(&'a mut self, handler: FallbackHandler) -> &mut Self {
+        self.fallback_handler = handler;
+
+        self
+    }
+
     fn into_server(self) -> Server<Data> {
         Server {
             data: self.data,
             router: Arc::new(self.router),
             middleware: Arc::new(self.middleware),
+            fallback_handler: self.fallback_handler,
         }
     }
 
@@ -85,6 +101,7 @@ struct Server<Data> {
     data: Data,
     router: Arc<Router<Data>>,
     middleware: Arc<Vec<Box<dyn Middleware<Data> + Send + Sync>>>,
+    fallback_handler: FallbackHandler,
 }
 
 impl<Data: Clone + Send + Sync + 'static> Service for Server<Data> {
@@ -97,6 +114,7 @@ impl<Data: Clone + Send + Sync + 'static> Service for Server<Data> {
         let mut data = self.data.clone();
         let router = self.router.clone();
         let middleware = self.middleware.clone();
+        let fallback_handler = self.fallback_handler;
 
         let mut req = req.map(Body::from);
         let path = req.uri().path().to_owned();
@@ -120,10 +138,7 @@ impl<Data: Clone + Send + Sync + 'static> Service for Server<Data> {
 
                     Ok(resp.map(Into::into))
                 } else {
-                    Ok(http::Response::builder()
-                        .status(http::status::StatusCode::NOT_FOUND)
-                        .body(hyper::Body::empty())
-                        .unwrap())
+                    Ok(fallback_handler().map(Into::into))
                 }
             },
         ))
